@@ -72,6 +72,18 @@ if ((NOT BRPC_INCLUDE_PATH) OR (NOT BRPC_LIB))
     message(FATAL_ERROR "Fail to find brpc")
 endif()
 
+# Find Thrift
+find_path(THRIFT_INCLUDE_PATH NAMES thrift/Thrift.h)
+find_library(THRIFT_LIB NAMES thrift)
+find_library(THRIFTZ_LIB NAMES thriftz)
+if ((NOT THRIFT_INCLUDE_PATH) OR (NOT THRIFT_LIB))
+    message(WARNING "Thrift not found, RPC components will not be built")
+    set(THRIFT_FOUND FALSE)
+else()
+    set(THRIFT_FOUND TRUE)
+    message(STATUS "Found Thrift: ${THRIFT_INCLUDE_PATH}")
+endif()
+
 if (NOT PROTOBUF_PROTOC_EXECUTABLE)
     get_filename_component(PROTO_LIB_DIR ${PROTOBUF_LIBRARY} DIRECTORY)
     set (PROTOBUF_PROTOC_EXECUTABLE "${PROTO_LIB_DIR}/../bin/protoc")
@@ -92,6 +104,10 @@ include_directories(
         ${BRPC_INCLUDE_PATH}
         ${OPENSSL_INCLUDE_DIR}
         )
+if(THRIFT_FOUND)
+    include_directories(${THRIFT_INCLUDE_PATH})
+    include_directories(${CMAKE_SOURCE_DIR}/idl/gen-cpp)
+endif()
 
 if(BRPC_WITH_GLOG)
     set(DYNAMIC_LIB
@@ -124,6 +140,13 @@ if(LEVELDB_WITH_SNAPPY)
     set(DYNAMIC_LIB ${DYNAMIC_LIB}
         ${SNAPPY_LIB}
 	)
+endif()
+
+# Add Thrift library if found
+if(THRIFT_FOUND)
+    set(DYNAMIC_LIB ${DYNAMIC_LIB}
+        ${THRIFT_LIB}
+    )
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
@@ -171,10 +194,20 @@ foreach(PROTO ${BRAFT_PROTOS})
 endforeach()
 
 file(GLOB_RECURSE BRAFT_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/braft/*.cpp")
+
+# Exclude RPC components that conflict with existing code
+list(FILTER BRAFT_SOURCES EXCLUDE REGEX ".*rpc/.*\\.cpp$")
+
 set(SOURCES
     ${BRAFT_SOURCES}
     ${PROTO_SRCS}
     )
+
+# Add Thrift generated sources if found (disabled for now due to type conflicts)
+# if(THRIFT_FOUND)
+#     file(GLOB THRIFT_GEN_SOURCES "${CMAKE_SOURCE_DIR}/idl/gen-cpp/*.cpp")
+#     list(APPEND SOURCES ${THRIFT_GEN_SOURCES})
+# endif()
 
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -230,6 +263,58 @@ if(BUILD_UNIT_TESTS)
     add_subdirectory(test)
 endif()
 add_subdirectory(tools)
+
+# Build v2 module if Thrift is found
+if(THRIFT_FOUND)
+    # Build v2 library (Thrift-based Raft implementation)
+    file(GLOB BRAFT_V2_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/braft/v2/*.cpp")
+
+    # Add RPC components (needed by v2)
+    file(GLOB BRAFT_RPC_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/braft/rpc/*.cpp")
+
+    # Add Thrift generated sources
+    file(GLOB THRIFT_GEN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/idl/gen-cpp/*.cpp")
+
+    # Filter out skeleton files
+    list(FILTER THRIFT_GEN_SOURCES EXCLUDE REGEX ".*skeleton\\.cpp$")
+
+    set(V2_SOURCES ${BRAFT_V2_SOURCES} ${BRAFT_RPC_SOURCES} ${THRIFT_GEN_SOURCES})
+
+    add_library(braft_v2 STATIC ${V2_SOURCES})
+    target_include_directories(braft_v2 PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/idl/gen-cpp
+        ${THRIFT_INCLUDE_PATH}
+    )
+    target_link_libraries(braft_v2
+        ${THRIFT_LIB}
+        ${GFLAGS_LIB}
+        ${LEVELDB_LIB}
+        ${CMAKE_THREAD_LIBS_INIT}
+        ${OPENSSL_LIBRARIES}
+        ${OPENSSL_CRYPTO_LIBRARY}
+        dl
+        z
+    )
+
+    # Build v2 example
+    add_executable(v2_example example/v2_example.cpp)
+    target_link_libraries(v2_example braft_v2)
+
+    # Build v2 raft test
+    add_executable(v2_raft_test example/v2_raft_test.cpp)
+    target_link_libraries(v2_raft_test braft_v2)
+
+    # Build v2 config test
+    add_executable(v2_config_test example/v2_config_test.cpp)
+    target_link_libraries(v2_config_test braft_v2)
+
+    # Build v2 persistence test
+    add_executable(v2_persistence_test example/v2_persistence_test.cpp)
+    target_link_libraries(v2_persistence_test braft_v2)
+
+    message(STATUS "Building braft v2 module (Thrift-based)")
+endif()
 
 file(COPY ${CMAKE_CURRENT_BINARY_DIR}/braft/
         DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/output/include/braft/
