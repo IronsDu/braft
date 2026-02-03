@@ -24,6 +24,8 @@
 #include <butil/memory/ref_counted.h>
 #include <butil/iobuf.h>
 #include <bthread/execution_queue.h>
+// Use bthread compatibility layer for timer support
+#include "braft/compat/bthread.h"
 #include <brpc/server.h>
 #include "braft/raft.h"
 #include "braft/log_manager.h"

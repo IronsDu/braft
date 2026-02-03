@@ -22,6 +22,8 @@
 #include <brpc/controller.h>                     // brpc::Controller
 #include <brpc/reloadable_flags.h>               // BRPC_VALIDATE_GFLAG
 #include "braft/replicator.h"
+// bthread compatibility layer for timers (already included via replicator.h, but explicit for clarity)
+#include "braft/compat/bthread.h"
 #include "braft/node.h"                          // NodeImpl
 #include "braft/ballot_box.h"                    // BallotBox 
 #include "braft/log_entry.h"                     // LogEntry

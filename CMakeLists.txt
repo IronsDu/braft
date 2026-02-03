@@ -198,6 +198,12 @@ file(GLOB_RECURSE BRAFT_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/braft/*.cpp")
 # Exclude RPC components that conflict with existing code
 list(FILTER BRAFT_SOURCES EXCLUDE REGEX ".*rpc/.*\\.cpp$")
 
+# Exclude v2 module (built separately)
+list(FILTER BRAFT_SOURCES EXCLUDE REGEX ".*v2/.*\\.cpp$")
+
+# Exclude compat module (built separately)
+list(FILTER BRAFT_SOURCES EXCLUDE REGEX ".*compat/.*\\.cpp$")
+
 set(SOURCES
     ${BRAFT_SOURCES}
     ${PROTO_SRCS}
@@ -315,6 +321,22 @@ if(THRIFT_FOUND)
 
     message(STATUS "Building braft v2 module (Thrift-based)")
 endif()
+
+# Build compat library (adapter layer for replacing brpc/butil/bthread)
+file(GLOB BRAFT_COMPAT_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/braft/compat/*.cpp")
+
+add_library(braft_compat STATIC ${BRAFT_COMPAT_SOURCES})
+target_include_directories(braft_compat PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${THRIFT_INCLUDE_PATH}
+)
+target_link_libraries(braft_compat
+    ${THRIFT_LIB}
+    ${GFLAGS_LIB}
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+
+message(STATUS "Building braft compat module (adapter layer)")
 
 file(COPY ${CMAKE_CURRENT_BINARY_DIR}/braft/
         DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/output/include/braft/

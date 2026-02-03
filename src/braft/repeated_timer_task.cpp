@@ -16,6 +16,8 @@
 //          Ma,Jingwei(majingwei@baidu.com)
 
 #include "braft/repeated_timer_task.h"
+// bthread compatibility layer for timers (already included via repeated_timer_task.h, but explicit for clarity)
+#include "braft/compat/bthread.h"
 #include "braft/util.h"
 
 namespace braft {

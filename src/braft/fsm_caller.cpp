@@ -28,6 +28,7 @@
 
 #include "braft/fsm_caller.h"
 #include <bthread/unstable.h>
+#include "braft/compat/task_queue.h"  // 标准库任务队列实现
 
 namespace braft {
 
@@ -39,7 +40,8 @@ DEFINE_int32(raft_fsm_caller_commit_batch, 512,
 BRPC_VALIDATE_GFLAG(raft_fsm_caller_commit_batch, brpc::PositiveInteger);
 
 FSMCaller::FSMCaller()
-    : _log_manager(NULL)
+    : _task_queue(NULL)
+    , _log_manager(NULL)
     , _fsm(NULL)
     , _closure_queue(NULL)
     , _last_applied_index(0)
@@ -56,19 +58,24 @@ FSMCaller::~FSMCaller() {
     CHECK(_after_shutdown == NULL);
 }
 
-int FSMCaller::run(void* meta, bthread::TaskIterator<ApplyTask>& iter) {
-    FSMCaller* caller = (FSMCaller*)meta;
-    if (iter.is_queue_stopped()) {
-        caller->do_shutdown();
-        return 0;
-    }
+// 新版本的任务处理器（适配 ITaskQueue 接口）
+// context: FSMCaller 实例指针
+// tasks: 任务数组
+// count: 任务数量
+// 返回: 处理的任务数量
+size_t FSMCaller::run(void* context, ApplyTask* tasks, size_t count) {
+    FSMCaller* caller = static_cast<FSMCaller*>(context);
+
     int64_t max_committed_index = -1;
     int64_t counter = 0;
-    size_t  batch_size = FLAGS_raft_fsm_caller_commit_batch;
-    for (; iter; ++iter) {
-        if (iter->type == COMMITTED && counter < batch_size) {
-            if (iter->committed_index > max_committed_index) {
-                max_committed_index = iter->committed_index;
+    size_t batch_size = FLAGS_raft_fsm_caller_commit_batch;
+
+    for (size_t i = 0; i < count; ++i) {
+        ApplyTask* task = &tasks[i];
+
+        if (task->type == COMMITTED && counter < batch_size) {
+            if (task->committed_index > max_committed_index) {
+                max_committed_index = task->committed_index;
                 counter++;
             }
         } else {
@@ -80,49 +87,48 @@ int FSMCaller::run(void* meta, bthread::TaskIterator<ApplyTask>& iter) {
                 counter = 0;
                 batch_size = FLAGS_raft_fsm_caller_commit_batch;
             }
-            switch (iter->type) {
+
+            switch (task->type) {
             case COMMITTED:
-                if (iter->committed_index > max_committed_index) {
-                    max_committed_index = iter->committed_index;
+                if (task->committed_index > max_committed_index) {
+                    max_committed_index = task->committed_index;
                     counter++;
                 }
                 break;
             case SNAPSHOT_SAVE:
                 caller->_cur_task = SNAPSHOT_SAVE;
-                if (caller->pass_by_status(iter->done)) {
-                    caller->do_snapshot_save((SaveSnapshotClosure*)iter->done);
+                if (caller->pass_by_status(task->done)) {
+                    caller->do_snapshot_save((SaveSnapshotClosure*)task->done);
                 }
                 break;
             case SNAPSHOT_LOAD:
                 caller->_cur_task = SNAPSHOT_LOAD;
-                // TODO: do we need to allow the snapshot loading to recover the
-                // StateMachine if possible?
-                if (caller->pass_by_status(iter->done)) {
-                    caller->do_snapshot_load((LoadSnapshotClosure*)iter->done);
+                if (caller->pass_by_status(task->done)) {
+                    caller->do_snapshot_load((LoadSnapshotClosure*)task->done);
                 }
                 break;
             case LEADER_STOP:
                 caller->_cur_task = LEADER_STOP;
-                caller->do_leader_stop(*(iter->status));
-                delete iter->status;
+                caller->do_leader_stop(*(task->status));
+                delete task->status;
                 break;
             case LEADER_START:
-                caller->do_leader_start(*(iter->leader_start_context));
-                delete iter->leader_start_context;
+                caller->do_leader_start(*(task->leader_start_context));
+                delete task->leader_start_context;
                 break;
             case START_FOLLOWING:
                 caller->_cur_task = START_FOLLOWING;
-                caller->do_start_following(*(iter->leader_change_context));
-                delete iter->leader_change_context;
+                caller->do_start_following(*(task->leader_change_context));
+                delete task->leader_change_context;
                 break;
             case STOP_FOLLOWING:
                 caller->_cur_task = STOP_FOLLOWING;
-                caller->do_stop_following(*(iter->leader_change_context));
-                delete iter->leader_change_context;
+                caller->do_stop_following(*(task->leader_change_context));
+                delete task->leader_change_context;
                 break;
             case ERROR:
                 caller->_cur_task = ERROR;
-                caller->do_on_error((OnErrorClousre*)iter->done);
+                caller->do_on_error((OnErrorClousre*)task->done);
                 break;
             case IDLE:
                 CHECK(false) << "Can't reach here";
@@ -130,14 +136,15 @@ int FSMCaller::run(void* meta, bthread::TaskIterator<ApplyTask>& iter) {
             };
         }
     }
+
     if (max_committed_index >= 0) {
         caller->_cur_task = COMMITTED;
         caller->do_committed(max_committed_index);
         g_commit_tasks_batch_counter << counter;
-        counter = 0;
     }
+
     caller->_cur_task = IDLE;
-    return 0;
+    return count;  // 返回处理的所有任务数量
 }
 
 bool FSMCaller::pass_by_status(Closure* done) {
@@ -155,7 +162,7 @@ bool FSMCaller::pass_by_status(Closure* done) {
 }
 
 int FSMCaller::init(const FSMCallerOptions &options) {
-    if (options.log_manager == NULL || options.fsm == NULL 
+    if (options.log_manager == NULL || options.fsm == NULL
             || options.closure_queue == NULL) {
         return EINVAL;
     }
@@ -170,16 +177,17 @@ int FSMCaller::init(const FSMCallerOptions &options) {
     if (_node) {
         _node->AddRef();
     }
-    
-    bthread::ExecutionQueueOptions execq_opt;
-    execq_opt.bthread_attr = options.usercode_in_pthread 
-                             ? BTHREAD_ATTR_PTHREAD
-                             : BTHREAD_ATTR_NORMAL;
-    if (bthread::execution_queue_start(&_queue_id,
-                                   &execq_opt,
-                                   FSMCaller::run,
-                                   this) != 0) {
-        LOG(ERROR) << "fsm fail to start execution_queue";
+
+    // 创建标准库任务队列
+    _task_queue = compat::create_std_task_queue<ApplyTask>();
+
+    compat::TaskQueueOptions tq_options;
+    tq_options.use_pthread = options.usercode_in_pthread;
+
+    if (_task_queue->start(this, FSMCaller::run, tq_options) != 0) {
+        LOG(ERROR) << "fsm fail to start task queue";
+        delete _task_queue;
+        _task_queue = NULL;
         return -1;
     }
     _queue_started = true;
@@ -187,8 +195,8 @@ int FSMCaller::init(const FSMCallerOptions &options) {
 }
 
 int FSMCaller::shutdown() {
-    if (_queue_started) {
-        return bthread::execution_queue_stop(_queue_id);
+    if (_queue_started && _task_queue) {
+        return _task_queue->stop();
     }
     return 0;
 }
@@ -212,7 +220,7 @@ int FSMCaller::on_committed(int64_t committed_index) {
     ApplyTask t;
     t.type = COMMITTED;
     t.committed_index = committed_index;
-    return bthread::execution_queue_execute(_queue_id, t);
+    return _task_queue ? _task_queue->execute(t) : -1;
 }
 
 class OnErrorClousre : public Closure {
@@ -233,8 +241,7 @@ int FSMCaller::on_error(const Error& e) {
     ApplyTask t;
     t.type = ERROR;
     t.done = c;
-    if (bthread::execution_queue_execute(_queue_id, t, 
-                                         &bthread::TASK_OPTIONS_URGENT) != 0) {
+    if (_task_queue->execute_urgent(t) != 0) {
         c->Run();
         return -1;
     }
@@ -322,7 +329,7 @@ int FSMCaller::on_snapshot_save(SaveSnapshotClosure* done) {
     ApplyTask task;
     task.type = SNAPSHOT_SAVE;
     task.done = done;
-    return bthread::execution_queue_execute(_queue_id, task);
+    return _task_queue ? _task_queue->execute(task) : -1;
 }
 
 void FSMCaller::do_snapshot_save(SaveSnapshotClosure* done) {
@@ -361,7 +368,7 @@ int FSMCaller::on_snapshot_load(LoadSnapshotClosure* done) {
     ApplyTask task;
     task.type = SNAPSHOT_LOAD;
     task.done = done;
-    return bthread::execution_queue_execute(_queue_id, task);
+    return _task_queue ? _task_queue->execute(task) : -1;
 }
 
 void FSMCaller::do_snapshot_load(LoadSnapshotClosure* done) {
@@ -433,7 +440,7 @@ int FSMCaller::on_leader_stop(const butil::Status& status) {
     task.type = LEADER_STOP;
     butil::Status* on_leader_stop_status = new butil::Status(status);
     task.status = on_leader_stop_status;
-    if (bthread::execution_queue_execute(_queue_id, task) != 0) {
+    if (_task_queue->execute(task) != 0) {
         delete on_leader_stop_status;
         return -1;
     }
@@ -446,7 +453,7 @@ int FSMCaller::on_leader_start(int64_t term, int64_t lease_epoch) {
     LeaderStartContext* on_leader_start_context =
         new LeaderStartContext(term, lease_epoch);
     task.leader_start_context = on_leader_start_context;
-    if (bthread::execution_queue_execute(_queue_id, task) != 0) {
+    if (_task_queue->execute(task) != 0) {
         delete on_leader_start_context;
         return -1;
     }
@@ -465,10 +472,10 @@ void FSMCaller::do_leader_start(const LeaderStartContext& leader_start_context) 
 int FSMCaller::on_start_following(const LeaderChangeContext& start_following_context) {
     ApplyTask task;
     task.type = START_FOLLOWING;
-    LeaderChangeContext* context  = new LeaderChangeContext(start_following_context.leader_id(), 
+    LeaderChangeContext* context  = new LeaderChangeContext(start_following_context.leader_id(),
             start_following_context.term(), start_following_context.status());
     task.leader_change_context = context;
-    if (bthread::execution_queue_execute(_queue_id, task) != 0) {
+    if (_task_queue->execute(task) != 0) {
         delete context;
         return -1;
     }
@@ -478,10 +485,10 @@ int FSMCaller::on_start_following(const LeaderChangeContext& start_following_con
 int FSMCaller::on_stop_following(const LeaderChangeContext& stop_following_context) {
     ApplyTask task;
     task.type = STOP_FOLLOWING;
-    LeaderChangeContext* context = new LeaderChangeContext(stop_following_context.leader_id(), 
+    LeaderChangeContext* context = new LeaderChangeContext(stop_following_context.leader_id(),
             stop_following_context.term(), stop_following_context.status());
     task.leader_change_context = context;
-    if (bthread::execution_queue_execute(_queue_id, task) != 0) {
+    if (_task_queue->execute(task) != 0) {
         delete context;
         return -1;
     }
@@ -544,8 +551,10 @@ int64_t FSMCaller::applying_index() const {
 }
 
 void FSMCaller::join() {
-    if (_queue_started) {
-        bthread::execution_queue_join(_queue_id);
+    if (_queue_started && _task_queue) {
+        _task_queue->join();
+        delete _task_queue;
+        _task_queue = NULL;
         _queue_started = false;
     }
 }

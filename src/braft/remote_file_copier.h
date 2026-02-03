@@ -21,6 +21,8 @@
 
 #include <brpc/channel.h>
 #include <bthread/countdown_event.h>
+// Use bthread compatibility layer for timer support
+#include "braft/compat/bthread.h"
 #include "braft/file_service.pb.h"
 #include "braft/util.h"
 #include "braft/snapshot_throttle.h"

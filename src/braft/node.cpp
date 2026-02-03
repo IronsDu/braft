@@ -25,6 +25,8 @@
 #include "braft/util.h"
 #include "braft/raft.h"
 #include "braft/node.h"
+// bthread compatibility layer for timers (already included via node.h, but explicit for clarity)
+#include "braft/compat/bthread.h"
 #include "braft/log.h"
 #include "braft/raft_meta.h"
 #include "braft/snapshot.h"

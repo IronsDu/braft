@@ -17,6 +17,8 @@
 //          Xiong,Kai(xiongkai@baidu.com)
 
 #include "braft/remote_file_copier.h"
+// bthread compatibility layer for timers (already included via remote_file_copier.h, but explicit for clarity)
+#include "braft/compat/bthread.h"
 
 #include <gflags/gflags.h>
 #include <butil/strings/string_piece.h>
