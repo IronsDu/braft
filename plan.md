@@ -249,18 +249,102 @@ Thrift 生成的 `EntryType`, `ErrorType`, `RaftError` 与 Protobuf 生成的同
 
 ---
 
-## 当前进度（2026-02-04 更新）
+## 当前进度（2026-02-05 更新）
 
 - [x] 阶段 0：准备工作 ✅
 - [x] 阶段 1A：抽象接口层 ✅
 - [x] 阶段 2A：FSMCaller/LogManager 适配器 ✅
-- [🔄] 阶段 3A：Node/Replicator 定时器适配 ✅ (bthread_timer 部分)
+- [🔄] 阶段 3A：Node/Replicator 定时器适配 🔄 (RPC 服务端问题调试中)
 - [ ] 阶段 4A：Replicator RPC 适配
 - [ ] 阶段 5A：清理和优化
 
 ---
 
-## 环境信息（2026-02-04）
+## 阶段 3A 详细进展（2026-02-05）
+
+### 已完成的修改
+
+1. **RPC 服务端启动等待** ✅
+   - 文件：`src/braft/rpc/thrift_server.cpp`
+   - 修改：服务端启动后等待 200ms，确保线程就绪
+   - 提交：修复连接超时问题
+
+2. **TThreadPoolServer 替代 TThreadedServer** ✅
+   - 文件：`src/braft/rpc/thrift_server.h/cpp`
+   - 原因：TThreadedServer 可能在高并发下存在问题
+   - 使用线程池处理请求，提高稳定性
+
+3. **心跳立即发送** ✅
+   - 文件：`src/braft/v2/node.cpp`
+   - 修改：leader 当选后立即发送心跳，阻止其他节点选举
+   - 位置：`becomeLeaderInternal()` 函数
+
+4. **选举超时调整** ✅
+   - 基础超时：3000ms → 5000ms
+   - 随机变化：±1000ms → ±2000ms
+   - 目的：降低多节点同时超时的概率
+
+5. **锁竞争优化** ✅
+   - `startElection()`: 减少 `sendRequestVote()` 期间的锁持有时间
+   - `handleRequestVote()`: 使用 `std::unique_lock`，支持手动 unlock
+
+6. **死锁修复** ✅
+   - `handleRequestVote()`: 在调用 `stepDown()` 前释放锁
+   - `Node::start()`: 在启动 ThriftServer 前释放锁
+
+### 遇到的问题：节点 8090 RPC 无响应
+
+**症状**：
+- 节点 8091、8092 可以互相通信（RPC 正常）
+- 节点 8090 无法响应任何 RPC 请求（`THRIFT_EAGAIN` 超时）
+- 8090 的 `handleRequestVote()` 和 `startElection()` 都无法获取 `_mutex`
+
+**调试日志**：
+```
+[RPC] requestVote called from 127.0.0.1:8091:0, term=1
+[Node 127.0.0.1:8090:0] handleRequestVote: trying to acquire lock...
+ElectionTimer: TIMEOUT! triggering election...
+Node 127.0.0.1:8090:0 election timeout, starting election...
+[Node 127.0.0.1:8090:0] startElection: trying to acquire lock...
+```
+**两者都无法获取锁，说明 `_mutex` 被某个线程长时间持有。**
+
+**可能原因**：
+1. 某个线程在持有 `_mutex` 的同时被阻塞
+2. 内存损坏导致锁状态异常
+3. C++ 标准库 `std::mutex` 实现问题
+4. 线程调度器问题（某个线程被挂起）
+
+**未完成的调试**：
+- 尝试使用 `try_lock_for()` 检测死锁（`std::mutex` 不支持）
+- 需要添加更详细的锁状态监控
+- 可能需要使用 valgrind 或 helgrind 检测并发问题
+
+### 编译状态（2026-02-05）
+
+```
+✅ libbraft_compat.a     - 适配器模块库
+✅ libbraft_v2.a         - v2 模块静态库
+✅ libbraft.a            - legacy braft 静态库
+✅ libbraft.so           - legacy braft 共享库
+✅ braft_cli             - 命令行工具
+✅ v2_config_test        - v2 配置测试（有 RPC 问题）
+✅ v2_raft_test          - v2 Raft 测试
+✅ v2_persistence_test   - v2 持久化测试
+```
+
+### 测试状态（2026-02-05）
+
+| 测试 | 状态 | 说明 |
+|------|------|------|
+| test_compat | ⚠️ 部分通过 | ITaskQueue ✅, Timer ✅, brpc Adapter 跳过 |
+| v2_config_test | ❌ RPC 问题 | 节点 8090 无响应 |
+| v2_raft_test | ❌ RPC 问题 | 同上 |
+| v2_persistence_test | ✅ 通过 | 单节点测试 |
+
+---
+
+## 环境信息（2026-02-05）
 
 **分支**: `refactor/fbthrift-folly`
 **编译器**: GCC 15.2.1 (支持 C++20)
@@ -277,15 +361,6 @@ Thrift 生成的 `EntryType`, `ErrorType`, `RaftError` 与 Protobuf 生成的同
 - **openssl-devel**: openssl-devel 3.5.4
 - **brpc**: 1.6.0 (从源码编译，安装到 /usr/local)
 
-### 编译状态（2026-02-04）
-
-```
-✅ libbraft_compat.a     (557 KB)  - 适配器模块库
-✅ libbraft.a            (legacy braft 静态库)
-✅ libbraft.so           (legacy braft 共享库)
-✅ braft_cli             (命令行工具)
-```
-
 ---
 
 ## 参考资料
@@ -296,4 +371,4 @@ Thrift 生成的 `EntryType`, `ErrorType`, `RaftError` 与 Protobuf 生成的同
 
 ---
 
-**文档更新日期**：2026-02-04
+**文档更新日期**：2026-02-05

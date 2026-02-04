@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0
 
 #include "braft/rpc/thrift_server.h"
+#include <iostream>
 #include "braft/rpc/raft_rpc_service.h"
 #include "braft/rpc/file_rpc_service.h"
 
@@ -46,28 +47,46 @@ bool ThriftServer::start(int port,
         auto thread_factory = std::make_shared<
             apache::thrift::concurrency::ThreadFactory>();
 
+        // Create thread manager
+        _thread_manager = apache::thrift::concurrency::ThreadManager::newSimpleThreadManager(
+            num_threads);
+        _thread_manager->threadFactory(thread_factory);
+        _thread_manager->start();
+
+        std::cout << "[ThriftServer] ThreadManager started with " << num_threads
+                  << " workers" << std::endl;
+
         // Create processor
         auto processor = std::make_shared<RaftServiceProcessor>(raft_service);
 
-        // Create server (simple version without ThreadManager)
-        _server.reset(new apache::thrift::server::TThreadedServer(
+        // Create server with thread pool
+        _server.reset(new apache::thrift::server::TThreadPoolServer(
             processor,
             server_socket,
             transport_factory,
             protocol_factory,
-            thread_factory
+            _thread_manager
         ));
 
         // Start server in a separate thread
         _running.store(true);
         _server_thread = std::thread([this]() {
+            std::cout << "[ThriftServer] Server thread starting serve() on port "
+                      << _port << std::endl;
             _server->serve();
+            std::cout << "[ThriftServer] Server thread exited serve()" << std::endl;
         });
+
+        // Wait for server to be ready (give it time to start listening)
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        std::cout << "[ThriftServer] Server started on port " << port << std::endl;
 
         return true;
 
     } catch (const std::exception& e) {
         _running.store(false);
+        _thread_manager.reset();
         _server.reset();
         return false;
     }
@@ -84,10 +103,15 @@ void ThriftServer::stop() {
         _server->stop();
     }
 
+    if (_thread_manager) {
+        _thread_manager->stop();
+    }
+
     if (_server_thread.joinable()) {
         _server_thread.join();
     }
 
+    _thread_manager.reset();
     _server.reset();
 }
 

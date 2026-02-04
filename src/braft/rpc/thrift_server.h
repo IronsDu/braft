@@ -9,7 +9,8 @@
 #include <thread>
 #include <atomic>
 
-#include <thrift/server/TThreadedServer.h>
+#include <thrift/server/TThreadPoolServer.h>
+#include <thrift/concurrency/ThreadManager.h>
 #include <thrift/transport/TServerSocket.h>
 
 namespace braft {
@@ -67,7 +68,8 @@ public:
     int getPort() const { return _port; }
 
 private:
-    std::unique_ptr<apache::thrift::server::TThreadedServer> _server;
+    std::unique_ptr<apache::thrift::server::TThreadPoolServer> _server;
+    std::shared_ptr<apache::thrift::concurrency::ThreadManager> _thread_manager;
     std::thread _server_thread;
     std::atomic<bool> _running;
     int _port;

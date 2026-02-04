@@ -56,6 +56,10 @@ int main(int argc, char* argv[]) {
                   << ") started as " << node->getState() << std::endl;
     }
 
+    // Wait for all servers to be fully ready
+    std::cout << "\nWaiting for all servers to be ready..." << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
     // Wait for election
     std::cout << "\nStep 2: Waiting for leader election..." << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(3));

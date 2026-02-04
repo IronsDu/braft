@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0
 
 #include "braft/rpc/raft_rpc_service.h"
+#include <iostream>
 #include "braft/v2/node.h"
 
 // Note: Legacy Node support is removed to avoid Protobuf/Thrift type conflicts
@@ -21,16 +22,24 @@ RaftRpcService::~RaftRpcService() {
 
 void RaftRpcService::preVote(RequestVoteResponse& _return,
                               const RequestVoteRequest& req) {
+    std::cout << "[RPC] preVote called from " << req.server_id
+              << ", term=" << req.term << std::endl;
     if (_use_v2 && _node_v2) {
         _node_v2->handlePreVote(req, _return);
     }
+    std::cout << "[RPC] preVote returned to " << req.server_id
+              << ", granted=" << _return.granted << std::endl;
 }
 
 void RaftRpcService::requestVote(RequestVoteResponse& _return,
                                   const RequestVoteRequest& req) {
+    std::cout << "[RPC] requestVote called from " << req.server_id
+              << ", term=" << req.term << std::endl;
     if (_use_v2 && _node_v2) {
         _node_v2->handleRequestVote(req, _return);
     }
+    std::cout << "[RPC] requestVote returned to " << req.server_id
+              << ", granted=" << _return.granted << std::endl;
 }
 
 void RaftRpcService::appendEntries(AppendEntriesResponse& _return,

@@ -103,9 +103,12 @@ Node::~Node() {
 }
 
 bool Node::start(int port) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::cout << "[Node " << _server_id << "] start: trying to acquire lock..." << std::endl;
+    std::unique_lock<std::mutex> lock(_mutex);
+    std::cout << "[Node " << _server_id << "] start: lock acquired" << std::endl;
 
     if (_running.load()) {
+        std::cout << "[Node " << _server_id << "] start: already running, releasing lock" << std::endl;
         return false;
     }
 
@@ -131,8 +134,8 @@ bool Node::start(int port) {
 
         // Initialize ElectionTimer
         ElectionTimerOptions timer_options;
-        timer_options.election_timeout_ms = 3000;  // 3 second base timeout (increased for multi-node)
-        timer_options.timeout_variation_ms = 1000;  // +/- 1000ms jitter
+        timer_options.election_timeout_ms = 5000;  // 5 second base timeout (reduced election conflicts)
+        timer_options.timeout_variation_ms = 2000;  // +/- 2000ms jitter (spread out timeouts)
         timer_options.heartbeat_timeout_ms = 100;
         _election_timer->init(timer_options,
             [this]() { this->onElectionTimeout(); });
@@ -141,19 +144,28 @@ bool Node::start(int port) {
         // Create RPC service
         _raft_service = std::make_shared<RaftRpcService>(this);
 
+        _running.store(true);
+        _state = "FOLLOWER";
+
+        std::cout << "[Node " << _server_id << "] start: releasing lock before starting server" << std::endl;
+        // Release lock before starting server to avoid deadlock
+        // (server thread may try to acquire the same lock for RPC handling)
+        lock.unlock();
+
         // Create and start Thrift server
         _server.reset(new ThriftServer());
         if (!_server->start(port, _raft_service)) {
+            std::cerr << "Failed to start Thrift server" << std::endl;
+            // Re-acquire lock for cleanup
+            lock.lock();
             _election_timer->stop();
             _fsm_caller->shutdown();
             _log_manager->shutdown();
             _raft_service.reset();
             _server.reset();
+            _running.store(false);
             return false;
         }
-
-        _running.store(true);
-        _state = "FOLLOWER";
 
         std::cout << "Node " << _server_id << " started on port " << port
                   << " with LogManager, FSMCaller, ElectionTimer" << std::endl;
@@ -162,6 +174,10 @@ bool Node::start(int port) {
 
     } catch (const std::exception& e) {
         std::cerr << "Failed to start node: " << e.what() << std::endl;
+        // Re-acquire lock for cleanup if needed
+        if (!lock.owns_lock()) {
+            lock.lock();
+        }
         _election_timer.reset();
         _fsm_caller.reset();
         _log_manager.reset();
@@ -225,27 +241,40 @@ void Node::handlePreVote(const RequestVoteRequest& req,
 
 void Node::handleRequestVote(const RequestVoteRequest& req,
                              RequestVoteResponse& resp) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::cout << "[Node " << _server_id << "] handleRequestVote: trying to acquire lock..." << std::endl;
+    std::unique_lock<std::mutex> lock(_mutex);
+    std::cout << "[Node " << _server_id << "] handleRequestVote: lock acquired, state=" << _state
+              << ", current_term=" << _current_term << std::endl;
 
     resp.granted = false;
 
     // If request's term is smaller, reject
     if (req.term < _current_term) {
         resp.term = _current_term;  // Set response term to current term
-        std::cout << "Node " << _server_id << " rejected RequestVote from "
+        std::cout << "[Node " << _server_id << "] rejected RequestVote from "
                   << req.server_id << " term " << req.term
                   << " (current term " << _current_term << ")" << std::endl;
+        std::cout << "[Node " << _server_id << "] handleRequestVote: releasing lock" << std::endl;
         return;
     }
 
     // If request's term is higher, update and step down
     if (req.term > _current_term) {
+        bool was_leader = (_state == "LEADER");
         _current_term = req.term;
         _voted_for = "";
-        if (_state == "LEADER") {
+        _state = "FOLLOWER";
+
+        std::cout << "[Node " << _server_id << "] handleRequestVote: releasing lock to call stepDown" << std::endl;
+        // Release lock before calling stepDown() to avoid deadlock
+        // (stepDown() also tries to acquire the mutex)
+        lock.unlock();
+        if (was_leader) {
             stepDown();
         }
-        _state = "FOLLOWER";
+        // Re-acquire lock for the rest of the function
+        lock.lock();
+        std::cout << "[Node " << _server_id << "] handleRequestVote: re-acquired lock after stepDown" << std::endl;
     }
 
     // Set response term to (possibly updated) current term
@@ -253,8 +282,9 @@ void Node::handleRequestVote(const RequestVoteRequest& req,
 
     // Check if we already voted for someone else in this term
     if (!_voted_for.empty() && _voted_for != req.server_id) {
-        std::cout << "Node " << _server_id << " already voted for "
+        std::cout << "[Node " << _server_id << "] already voted for "
                   << _voted_for << " in term " << _current_term << std::endl;
+        std::cout << "[Node " << _server_id << "] handleRequestVote: releasing lock" << std::endl;
         return;
     }
 
@@ -266,12 +296,13 @@ void Node::handleRequestVote(const RequestVoteRequest& req,
     if (log_ok) {
         _voted_for = req.server_id;
         resp.granted = true;
-        std::cout << "Node " << _server_id << " voted for "
+        std::cout << "[Node " << _server_id << "] voted for "
                   << req.server_id << " in term " << _current_term << std::endl;
     } else {
-        std::cout << "Node " << _server_id << " rejected RequestVote from "
+        std::cout << "[Node " << _server_id << "] rejected RequestVote from "
                   << req.server_id << " (log not up-to-date)" << std::endl;
     }
+    std::cout << "[Node " << _server_id << "] handleRequestVote: releasing lock" << std::endl;
 }
 
 void Node::handleAppendEntries(const AppendEntriesRequest& req,
@@ -504,6 +535,14 @@ void Node::becomeLeaderInternal() {
     std::cout << "Node " << _server_id << " became leader for term "
               << _current_term << " with " << _replicators.size()
               << " replicators (next_index=" << next_index << ")" << std::endl;
+
+    // Immediately send heartbeats to all followers to assert leadership
+    // This prevents other nodes from starting unnecessary elections
+    for (auto& replicator : _replicators) {
+        if (replicator && replicator->isRunning()) {
+            replicator->sendHeartbeat();
+        }
+    }
 }
 
 void Node::stepDown() {
@@ -534,10 +573,13 @@ void Node::onElectionTimeout() {
 }
 
 void Node::startElection() {
+    std::cout << "[Node " << _server_id << "] startElection: trying to acquire lock..." << std::endl;
     std::unique_lock<std::mutex> lock(_mutex);
+    std::cout << "[Node " << _server_id << "] startElection: lock acquired, current state=" << _state << std::endl;
 
     // Only start election if we're follower or candidate
     if (_state == "LEADER") {
+        std::cout << "[Node " << _server_id << "] startElection: already leader, releasing lock" << std::endl;
         return;  // Already leader
     }
 
@@ -545,32 +587,41 @@ void Node::startElection() {
     _current_term++;
     _state = "CANDIDATE";
     _voted_for = _server_id;
+    std::cout << "[Node " << _server_id << "] startElection: updated state to CANDIDATE, term=" << _current_term << std::endl;
 
     // Reset election state
     _votes_granted = 1;  // Vote for self
     _votes_refused = 0;
     _election_complete.store(false);
+    std::cout << "[Node " << _server_id << "] startElection: reset election state" << std::endl;
 
     // Update log state from LogManager
+    std::cout << "[Node " << _server_id << "] startElection: getting log state from LogManager..." << std::endl;
     _last_log_index = _log_manager->lastLogIndex();
+    std::cout << "[Node " << _server_id << "] startElection: got lastLogIndex=" << _last_log_index << std::endl;
     _last_log_term = _log_manager->lastLogTerm();
+    std::cout << "[Node " << _server_id << "] startElection: got lastLogTerm=" << _last_log_term << std::endl;
 
-    std::cout << "Node " << _server_id << " starting election for term "
+    std::cout << "[Node " << _server_id << "] starting election for term "
               << _current_term << " (last_log_index=" << _last_log_index
               << ", last_log_term=" << _last_log_term << ")" << std::endl;
 
     // Send RequestVote to all peers
     // Note: We need to release lock before sending RPC
+    std::cout << "[Node " << _server_id << "] startElection: releasing lock to send RPC" << std::endl;
     lock.unlock();
     sendRequestVote();
-    lock.lock();
+    std::cout << "[Node " << _server_id << "] startElection: sendRequestVote returned" << std::endl;
 
+    // Re-acquire lock only for becomeLeader check
+    lock.lock();
     // Check if single-node cluster
     if (_peers.size() <= 1) {
         becomeLeader();
     }
+    lock.unlock();
 
-    // Reset election timer after starting election
+    // Reset election timer after starting election (no lock needed)
     _election_timer->reset();
 }
 
