@@ -225,7 +225,7 @@ void Replicator::replicateLogs() {
         if (entry) {
             EntryMeta meta;
             meta.term = entry->term;
-            meta.type = static_cast<EntryType::type>(entry->type);
+            meta.type = static_cast<ThriftEntryType::type>(entry->type);
             meta.data_len = entry->data.size();
             // Note: EntryMeta only has metadata, actual data would be in attachment
             // For this simplified version, we don't transfer actual data

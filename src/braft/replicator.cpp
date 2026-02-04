@@ -31,6 +31,7 @@
 
 namespace braft {
 
+
 DEFINE_int32(raft_max_entries_size, 1024,
              "The max number of entries in AppendEntriesRequest");
 BRPC_VALIDATE_GFLAG(raft_max_entries_size, ::brpc::PositiveInteger);
@@ -202,7 +203,7 @@ void Replicator::wait_for_caught_up(ReplicatorId id,
     }
     if (due_time != NULL) {
         done->_has_timer = true;
-        if (bthread_timer_add(&done->_timer,
+        if (compat::bthread_timer_add(&done->_timer,
                               *due_time,
                               _on_catch_up_timedout,
                               (void*)id) != 0) {
@@ -263,7 +264,7 @@ void Replicator::_block(long start_time_us, int error_code) {
     const timespec due_time = butil::milliseconds_from(
 	    butil::microseconds_to_timespec(start_time_us), blocking_time);
     bthread_timer_t timer;
-    const int rc = bthread_timer_add(&timer, due_time, 
+    const int rc = compat::bthread_timer_add(&timer, due_time, 
                                   _on_block_timedout, (void*)_id.value);
     if (rc == 0) {
         BRAFT_VLOG << "Blocking " << _options.peer_id << " for " 
@@ -949,7 +950,7 @@ void Replicator::_notify_on_caught_up(int error_code, bool before_destroy) {
             _catchup_closure->status().set_error(error_code, "%s", berror(error_code));
         }
         if (_catchup_closure->_has_timer) {
-            if (!before_destroy && bthread_timer_del(_catchup_closure->_timer) == 1) {
+            if (!before_destroy && compat::bthread_timer_del(_catchup_closure->_timer) == 1) {
                 // There's running timer task, let timer task trigger
                 // on_caught_up to void ABA problem
                 return;
@@ -974,7 +975,7 @@ void Replicator::_start_heartbeat_timer(long start_time_us) {
     const timespec due_time = butil::milliseconds_from(
             butil::microseconds_to_timespec(start_time_us), 
             *_options.dynamic_heartbeat_timeout_ms);
-    if (bthread_timer_add(&_heartbeat_timer, due_time,
+    if (compat::bthread_timer_add(&_heartbeat_timer, due_time,
                        _on_timedout, (void*)_id.value) != 0) {
         _on_timedout((void*)_id.value);
     }
@@ -999,7 +1000,7 @@ int Replicator::_on_error(bthread_id_t id, void* arg, int error_code) {
         brpc::StartCancel(r->_heartbeat_in_fly);
         brpc::StartCancel(r->_timeout_now_in_fly);
         r->_cancel_append_entries_rpcs();
-        bthread_timer_del(r->_heartbeat_timer);
+        compat::bthread_timer_del(r->_heartbeat_timer);
         r->_options.log_manager->remove_waiter(r->_wait_id);
         r->_notify_on_caught_up(error_code, true);
         r->_wait_id = 0;

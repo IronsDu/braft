@@ -22,7 +22,7 @@ namespace v2 {
 struct LogEntry {
     int64_t index;
     int64_t term;
-    int32_t type;  // EntryType enum value
+    int32_t type;  // ThriftEntryType enum value
     std::vector<uint8_t> data;
 
     LogEntry() : index(0), term(0), type(0) {}

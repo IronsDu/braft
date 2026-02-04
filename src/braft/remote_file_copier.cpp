@@ -32,6 +32,7 @@
 
 namespace braft {
 
+
 DEFINE_int32(raft_max_byte_count_per_rpc, 1024 * 128 /*128K*/,
              "Maximum of block size per RPC");
 BRPC_VALIDATE_GFLAG(raft_max_byte_count_per_rpc, brpc::PositiveInteger);
@@ -228,7 +229,7 @@ void RemoteFileCopier::Session::send_next_rpc() {
             AddRef();
             int64_t retry_interval_ms_when_throttled = 
                                     _throttle->get_retry_interval_ms();
-            if (bthread_timer_add(
+            if (compat::bthread_timer_add(
                     &_timer, 
                     butil::milliseconds_from_now(retry_interval_ms_when_throttled),
                     on_timer, this) != 0) {
@@ -283,7 +284,7 @@ void RemoteFileCopier::Session::on_rpc_returned() {
             }
         }
         AddRef();
-        if (bthread_timer_add(
+        if (compat::bthread_timer_add(
                     &_timer, 
                     butil::milliseconds_from_now(retry_interval_ms),
                     on_timer, this) != 0) {
@@ -372,7 +373,7 @@ void RemoteFileCopier::Session::cancel() {
         return; 
     }
     brpc::StartCancel(_rpc_call);
-    if (bthread_timer_del(_timer) == 0) {
+    if (compat::bthread_timer_del(_timer) == 0) {
         // Release reference of the timer task
         Release();
     }

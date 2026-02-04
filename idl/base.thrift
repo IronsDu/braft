@@ -5,10 +5,10 @@
 namespace cpp braft
 
 /**
- * EntryType - Log entry type enumeration
- * Maps to braft/enum.proto EntryType
+ * ThriftEntryType - Log entry type enumeration
+ * Renamed from EntryType to avoid conflict with Protobuf enum
  */
-enum EntryType {
+enum ThriftEntryType {
   ENTRY_TYPE_UNKNOWN = 0,
   ENTRY_TYPE_NO_OP = 1,
   ENTRY_TYPE_DATA = 2,
@@ -16,10 +16,10 @@ enum EntryType {
 }
 
 /**
- * ErrorType - Error type enumeration
- * Maps to braft/enum.proto ErrorType
+ * ThriftErrorType - Error type enumeration
+ * Renamed from ErrorType to avoid conflict with Protobuf enum
  */
-enum ErrorType {
+enum ThriftErrorType {
   ERROR_TYPE_NONE = 0,
   ERROR_TYPE_LOG = 1,
   ERROR_TYPE_STABLE = 2,
@@ -28,11 +28,11 @@ enum ErrorType {
 }
 
 /**
- * RaftError - Raft specific error codes
- * Maps to braft/errno.proto RaftError
+ * ThriftRaftError - Raft specific error codes
+ * Renamed from RaftError to avoid conflict with Protobuf enum
  * Error codes start from 10000 to avoid conflicts with HTTP and RPC errors
  */
-enum RaftError {
+enum ThriftRaftError {
   ERAFTTIMEDOUT = 10001,         // Various timeouts (election, timeout_now, stepdown)
   ESTATEMACHINE = 10002,         // Bad user state machine
   ECATCHUP = 10003,              // Catchup failed
@@ -66,7 +66,7 @@ struct TermLeader {
  */
 struct EntryMeta {
   1: i64 term,
-  2: EntryType type,
+  2: ThriftEntryType type,
   3: list<string> peers,
   4: optional i64 data_len,
   // old_peers field ID preserved for backward compatibility consideration
