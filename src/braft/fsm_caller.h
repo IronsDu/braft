@@ -21,7 +21,8 @@
 
 #include <butil/macros.h>                        // BAIDU_CACHELINE_ALIGNMENT
 #include <bthread/bthread.h>
-#include <bthread/execution_queue.h>
+// #include <bthread/execution_queue.h>  // 替换为 compat/task_queue.h
+#include "braft/compat/task_queue.h"            // 使用抽象任务队列
 #include "braft/ballot_box.h"
 #include "braft/closure_queue.h"
 #include "braft/macros.h"
@@ -169,7 +170,8 @@ friend class IteratorImpl;
     };
 
     static double get_cumulated_cpu_time(void* arg);
-    static int run(void* meta, bthread::TaskIterator<ApplyTask>& iter);
+    // 适配器版本的任务处理器函数
+    static size_t run(void* context, ApplyTask* tasks, size_t count);
     void do_shutdown(); //Closure* done);
     void do_committed(int64_t committed_index);
     void do_cleared(int64_t log_index, Closure* done, int error_code);
@@ -183,7 +185,8 @@ friend class IteratorImpl;
     void set_error(const Error& e);
     bool pass_by_status(Closure* done);
 
-    bthread::ExecutionQueueId<ApplyTask> _queue_id;
+    // 使用抽象任务队列
+    compat::ITaskQueue<ApplyTask>* _task_queue;
     LogManager *_log_manager;
     StateMachine *_fsm;
     ClosureQueue* _closure_queue;

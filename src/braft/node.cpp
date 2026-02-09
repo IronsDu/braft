@@ -25,6 +25,8 @@
 #include "braft/util.h"
 #include "braft/raft.h"
 #include "braft/node.h"
+// bthread compatibility layer for timers (already included via node.h, but explicit for clarity)
+#include "braft/compat/bthread.h"
 #include "braft/log.h"
 #include "braft/raft_meta.h"
 #include "braft/snapshot.h"
@@ -35,6 +37,7 @@
 #include "braft/errno.pb.h"
 
 namespace braft {
+
 
 DEFINE_int32(raft_max_election_delay_ms, 1000, 
              "Max election delay time allowed by user");
@@ -1260,7 +1263,7 @@ int NodeImpl::transfer_leadership_to(const PeerId& peer) {
     LOG(INFO) << "node " << _group_id << ":" << _server_id
               << " starts to transfer leadership to " << peer_id;
     _stop_transfer_arg = new StopTransferArg(this, _current_term, peer_id);
-    if (bthread_timer_add(&_transfer_timer,
+    if (compat::bthread_timer_add(&_transfer_timer,
                        butil::milliseconds_from_now(_options.election_timeout_ms),
                        on_transfer_timeout, _stop_transfer_arg) != 0) {
         lck.unlock();
@@ -1861,7 +1864,7 @@ void NodeImpl::step_down(const int64_t term, bool wakeup_a_candidate,
         _replicator_group.stop_all();
     }
     if (_stop_transfer_arg != NULL) {
-        const int rc = bthread_timer_del(_transfer_timer);
+        const int rc = compat::bthread_timer_del(_transfer_timer);
         if (rc == 0) {
             // Get the right to delete _stop_transfer_arg.
             delete _stop_transfer_arg;
@@ -3159,7 +3162,7 @@ bool NodeImpl::AppendEntriesCache::start_timer() {
             butil::milliseconds_to_timespec(timer_arg->timer_start_ms),
             std::max(_node->_options.election_timeout_ms >> 2, 1));
     _node->AddRef();
-    if (bthread_timer_add(
+    if (compat::bthread_timer_add(
                 &_timer, duetime, NodeImpl::on_append_entries_cache_timedout,
                 timer_arg) != 0) {
         LOG(ERROR) << "Fail to add timer";
@@ -3175,7 +3178,7 @@ void NodeImpl::AppendEntriesCache::stop_timer() {
         return;
     }
     ++_timer_version;
-    if (bthread_timer_del(_timer) == 0) {
+    if (compat::bthread_timer_del(_timer) == 0) {
         _node->Release();
         _timer = bthread_timer_t();
     }
@@ -3489,7 +3492,7 @@ void NodeImpl::VoteBallotCtx::start_grant_self_timer(int64_t wait_ms, NodeImpl* 
     timer_arg->vote_ctx = this;
     node->AddRef();
     _grant_self_arg = timer_arg;
-    if (bthread_timer_add(
+    if (compat::bthread_timer_add(
                 &_timer, duetime, NodeImpl::on_grant_self_timedout,
                 timer_arg) != 0) {
         LOG(ERROR) << "Fail to add timer";
@@ -3503,7 +3506,7 @@ void NodeImpl::VoteBallotCtx::stop_grant_self_timer(NodeImpl* node) {
     if (_timer == bthread_timer_t()) {
         return;
     }
-    if (bthread_timer_del(_timer) == 0) {
+    if (compat::bthread_timer_del(_timer) == 0) {
         node->Release();
         delete _grant_self_arg;
         _grant_self_arg = NULL;

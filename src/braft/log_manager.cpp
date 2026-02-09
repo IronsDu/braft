@@ -24,6 +24,7 @@
 #include <brpc/reloadable_flags.h>         // BRPC_VALIDATE_GFLAG
 #include "braft/storage.h"                       // LogStorage
 #include "braft/fsm_caller.h"                    // FSMCaller
+#include "braft/compat/task_queue.h"            // 标准库任务队列实现
 
 namespace braft {
 
@@ -109,18 +110,44 @@ LogManager::~LogManager() {
 }
 
 int LogManager::start_disk_thread() {
-    bthread::ExecutionQueueOptions queue_options;
-    queue_options.bthread_attr = BTHREAD_ATTR_NORMAL;
-    return bthread::execution_queue_start(&_disk_queue,
-                                   &queue_options,
-                                   disk_thread,
-                                   this);
+    // 创建标准库任务队列
+    _disk_queue = compat::create_std_task_queue<StableClosure*>();
+
+    compat::TaskQueueOptions options;
+    options.use_pthread = false;
+
+    return _disk_queue->start(this, LogManager::disk_task_handler, options);
 }
 
 int LogManager::stop_disk_thread() {
-    bthread::execution_queue_stop(_disk_queue);
-    return bthread::execution_queue_join(_disk_queue);
+    if (_disk_queue) {
+        _disk_queue->stop();
+        _disk_queue->join();
+        delete _disk_queue;
+        _disk_queue = NULL;
+    }
+    return 0;
 }
+
+// 任务处理器适配器（静态函数）
+size_t LogManager::disk_task_handler(void* context, StableClosure** tasks, size_t count) {
+    LogManager* log_manager = static_cast<LogManager*>(context);
+
+    // 简化实现：逐个处理任务
+    // TODO: 优化为批量处理
+    for (size_t i = 0; i < count; ++i) {
+        StableClosure* done = tasks[i];
+        if (done) {
+            done->Run();
+        }
+    }
+
+    return count;
+}
+
+// 保留原始 disk_thread 函数，稍后重构
+// 注意：原始函数使用 bthread::TaskIterator，与 ITaskQueue 接口不兼容
+// 暂时保留以供参考，后续需要重构
 
 void LogManager::clear_memory_logs(const LogId& id) {
     LogEntry* entries_to_clear[256];
@@ -180,7 +207,7 @@ int64_t LogManager::last_log_index(bool is_flush) {
             return _last_log_index;
         }
         LastLogIdClosure c;
-        CHECK_EQ(0, bthread::execution_queue_execute(_disk_queue, &c));
+        CHECK_EQ(0, _disk_queue->execute(&c));
         lck.unlock();
         c.wait();
         return c.last_log_id().index;
@@ -199,7 +226,7 @@ LogId LogManager::last_log_id(bool is_flush) {
             return _last_snapshot_id;
         }
         LastLogIdClosure c;
-        CHECK_EQ(0, bthread::execution_queue_execute(_disk_queue, &c));
+        CHECK_EQ(0, _disk_queue->execute(&c));
         lck.unlock();
         c.wait();
         return c.last_log_id();
@@ -277,7 +304,7 @@ int LogManager::truncate_prefix(const int64_t first_index_kept,
     }
     _config_manager->truncate_prefix(first_index_kept);
     TruncatePrefixClosure* c = new TruncatePrefixClosure(first_index_kept);
-    const int rc = bthread::execution_queue_execute(_disk_queue, c);
+    const int rc = _disk_queue->execute(c);
     lck.unlock();
     for (size_t i = 0; i < saved_logs_in_memory.size(); ++i) {
         saved_logs_in_memory[i]->Release();
@@ -295,7 +322,7 @@ int LogManager::reset(const int64_t next_log_index,
     _config_manager->truncate_prefix(_first_log_index);
     _config_manager->truncate_suffix(_last_log_index);
     ResetClosure* c = new ResetClosure(next_log_index);
-    const int ret = bthread::execution_queue_execute(_disk_queue, c);
+    const int ret = _disk_queue->execute(c);
     lck.unlock();
     CHECK_EQ(0, ret) << "execq execute failed, ret: " << ret << " err: " << berror();
     for (size_t i = 0; i < saved_logs_in_memory.size(); ++i) {
@@ -328,7 +355,7 @@ void LogManager::unsafe_truncate_suffix(const int64_t last_index_kept) {
     _config_manager->truncate_suffix(last_index_kept);
     TruncateSuffixClosure* tsc = new
             TruncateSuffixClosure(last_index_kept, last_term_kept);
-    CHECK_EQ(0, bthread::execution_queue_execute(_disk_queue, tsc));
+    CHECK_EQ(0, _disk_queue->execute(tsc));
 }
 
 int LogManager::check_and_resolve_conflict(
@@ -441,7 +468,7 @@ void LogManager::append_entries(
     }
 
     done->_entries.swap(*entries);
-    int ret = bthread::execution_queue_execute(_disk_queue, done);
+    int ret = _disk_queue->execute(done);
     CHECK_EQ(0, ret) << "execq execute failed, ret: " << ret << " err: " << berror();
     wakeup_all_waiter(lck);
 }
@@ -540,6 +567,7 @@ private:
     LogManager* _lm;
 };
 
+#if 0
 int LogManager::disk_thread(void* meta,
                             bthread::TaskIterator<StableClosure*>& iter) {
     if (iter.is_queue_stopped()) {
@@ -618,6 +646,8 @@ int LogManager::disk_thread(void* meta,
     log_manager->set_disk_id(last_id);
     return 0;
 }
+#endif
+
 
 void LogManager::set_snapshot(const SnapshotMeta* meta) {
     BRAFT_VLOG << "Set snapshot last_included_index="

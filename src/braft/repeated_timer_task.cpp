@@ -16,9 +16,12 @@
 //          Ma,Jingwei(majingwei@baidu.com)
 
 #include "braft/repeated_timer_task.h"
+// bthread compatibility layer for timers (already included via repeated_timer_task.h, but explicit for clarity)
+#include "braft/compat/bthread.h"
 #include "braft/util.h"
 
 namespace braft {
+
 
 RepeatedTimerTask::RepeatedTimerTask()
     : _timeout_ms(0)
@@ -48,7 +51,7 @@ void RepeatedTimerTask::stop() {
     BRAFT_RETURN_IF(_stopped);
     _stopped = true;
     CHECK(_running);
-    const int rc = bthread_timer_del(_timer);
+    const int rc = compat::bthread_timer_del(_timer);
     if (rc == 0) {
         _running = false;
         return;
@@ -100,7 +103,7 @@ void RepeatedTimerTask::start() {
 
 void RepeatedTimerTask::run_once_now() {
     std::unique_lock<raft_mutex_t> lck(_mutex);
-    if (bthread_timer_del(_timer) == 0) {
+    if (compat::bthread_timer_del(_timer) == 0) {
         lck.unlock();
         on_timedout(this);
     }
@@ -127,7 +130,7 @@ void RepeatedTimerTask::on_timedout(void* arg) {
 void RepeatedTimerTask::schedule(std::unique_lock<raft_mutex_t>& lck) {
     _next_duetime =
             butil::milliseconds_from_now(adjust_timeout_ms(_timeout_ms));
-    if (bthread_timer_add(&_timer, _next_duetime, on_timedout, this) != 0) {
+    if (compat::bthread_timer_add(&_timer, _next_duetime, on_timedout, this) != 0) {
         lck.unlock();
         LOG(ERROR) << "Fail to add timer";
         return on_timedout(this);
@@ -138,7 +141,7 @@ void RepeatedTimerTask::reset() {
     std::unique_lock<raft_mutex_t> lck(_mutex);
     BRAFT_RETURN_IF(_stopped);
     CHECK(_running);
-    const int rc = bthread_timer_del(_timer);
+    const int rc = compat::bthread_timer_del(_timer);
     if (rc == 0) {
         return schedule(lck);
     }
@@ -150,7 +153,7 @@ void RepeatedTimerTask::reset(int timeout_ms) {
     _timeout_ms = timeout_ms;
     BRAFT_RETURN_IF(_stopped);
     CHECK(_running);
-    const int rc = bthread_timer_del(_timer);
+    const int rc = compat::bthread_timer_del(_timer);
     if (rc == 0) {
         return schedule(lck);
     }
@@ -169,7 +172,7 @@ void RepeatedTimerTask::destroy() {
     }
     BRAFT_RETURN_IF(_stopped);
     _stopped = true;
-    const int rc = bthread_timer_del(_timer);
+    const int rc = compat::bthread_timer_del(_timer);
     if (rc == 0) {
         _running = false;
         lck.unlock();

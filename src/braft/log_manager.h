@@ -21,7 +21,8 @@
 #include <butil/macros.h>                        // BAIDU_CACHELINE_ALIGNMENT
 #include <butil/containers/flat_map.h>           // butil::FlatMap
 #include <deque>                                // std::deque
-#include <bthread/execution_queue.h>            // bthread::ExecutionQueueId
+// #include <bthread/execution_queue.h>            // bthread::ExecutionQueueId
+#include "braft/compat/task_queue.h"            // 使用抽象任务队列
 
 #include "braft/raft.h"                          // Closure
 #include "braft/util.h"                          // raft_mutex_t
@@ -159,9 +160,13 @@ friend class AppendBatcher;
 
     void append_to_storage(std::vector<LogEntry*>* to_append, LogId* last_id, IOMetric* metric);
 
-    static int disk_thread(void* meta,
-                           bthread::TaskIterator<StableClosure*>& iter);
-    
+    // 新版本的任务处理器（适配 ITaskQueue 接口）
+    static size_t disk_task_handler(void* context, StableClosure** tasks, size_t count);
+
+    // 保留原始 disk_thread 函数，暂不使用
+    // static int disk_thread(void* meta,
+    //                        bthread::TaskIterator<StableClosure*>& iter);
+
     // delete logs from storage's head, [1, first_index_kept) will be discarded
     // Returns:
     //  success return 0, failed return -1
@@ -225,7 +230,8 @@ friend class AppendBatcher;
     // or may cause some unexpect cases
     LogId _virtual_first_log_id;
 
-    bthread::ExecutionQueueId<StableClosure*> _disk_queue;
+    // 使用抽象任务队列
+    compat::ITaskQueue<StableClosure*>* _disk_queue;
 };
 
 }  //  namespace braft

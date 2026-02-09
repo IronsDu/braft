@@ -20,6 +20,8 @@
 #define  BRAFT_REPLICATOR_H
 
 #include <bthread/bthread.h>                            // bthread_id
+// Use bthread compatibility layer for timer support
+#include "braft/compat/bthread.h"
 #include <brpc/channel.h>                  // brpc::Channel
 
 #include "braft/storage.h"                       // SnapshotStorage
