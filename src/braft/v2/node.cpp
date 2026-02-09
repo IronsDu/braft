@@ -7,9 +7,202 @@
 #include <sstream>
 #include <memory>
 #include <algorithm>
+#include <thread>
+#include <chrono>
 
 namespace braft {
 namespace v2 {
+
+// Debug helper to get current thread ID as string
+static std::string getThreadIdStr() {
+    std::ostringstream oss;
+    oss << std::this_thread::get_id();
+    return oss.str();
+}
+
+// Global lock state tracker for debugging
+struct LockState {
+    std::string node_id;
+    std::string context;
+    std::thread::id thread_id;
+    bool locked;
+    std::chrono::steady_clock::time_point acquire_time;
+
+    void print(const std::string& action) const {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - acquire_time).count();
+        std::cout << "[LOCK STATE] Node " << node_id << " thread=" << thread_id
+                  << " context=" << context << " action=" << action;
+        if (locked && elapsed > 0) {
+            std::cout << " held_for=" << elapsed << "ms";
+        }
+        std::cout << std::endl;
+    }
+};
+
+// Global tracking map (protected by a mutex for thread safety)
+static std::map<std::string, LockState> g_lock_states;
+static std::mutex g_lock_state_mutex;
+
+// Debug lock wrapper to track lock acquisitions
+class DebugLock {
+public:
+    DebugLock(std::recursive_mutex& mutex, const std::string& node_id, const std::string& context)
+        : _mutex(mutex), _node_id(node_id), _context(context), _locked(false) {
+        lock();
+    }
+
+    ~DebugLock() {
+        if (_locked) {
+            unlock();
+        }
+    }
+
+    void lock() {
+        if (_locked) return;
+
+        std::cout << "[Node " << _node_id << "] LOCK(" << _context
+                  << "): trying to acquire... thread=" << getThreadIdStr() << std::endl;
+
+        // Check current lock states
+        {
+            std::lock_guard<std::mutex> lock(g_lock_state_mutex);
+            std::cout << "[Node " << _node_id << "] >>> Current lock states:" << std::endl;
+            for (const auto& entry : g_lock_states) {
+                const LockState& state = entry.second;
+                if (state.locked) {
+                    state.print("LOCKED");
+                }
+            }
+        }
+
+        auto start = std::chrono::steady_clock::now();
+
+        // Try to lock with timeout and diagnostics
+        while (true) {
+            for (int i = 0; i < 100; ++i) {
+                if (_mutex.try_lock()) {
+                    _locked = true;
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start).count();
+
+                    if (elapsed > 100) {
+                        std::cout << "[Node " << _node_id << "] LOCK(" << _context
+                                  << "): ACQUIRED after " << elapsed << "ms"
+                                  << " thread=" << getThreadIdStr() << std::endl;
+                    } else {
+                        std::cout << "[Node " << _node_id << "] LOCK(" << _context
+                                  << "): acquired thread=" << getThreadIdStr() << std::endl;
+                    }
+
+                    // Register lock state
+                    {
+                        std::lock_guard<std::mutex> lock(g_lock_state_mutex);
+                        LockState state;
+                        state.node_id = _node_id;
+                        state.context = _context;
+                        state.thread_id = std::this_thread::get_id();
+                        state.locked = true;
+                        state.acquire_time = std::chrono::steady_clock::now();
+                        g_lock_states[_node_id + ":" + _context] = state;
+                    }
+
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+
+            if (elapsed > 1000) {
+                std::cout << "[Node " << _node_id << "] LOCK(" << _context
+                          << "): WARNING - still waiting after " << elapsed << "ms"
+                          << " thread=" << getThreadIdStr() << std::endl;
+                std::cout << "[Node " << _node_id << "] >>> This might indicate a deadlock!"
+                          << std::endl;
+                std::cout << "[Node " << _node_id << "] >>> Dumping current lock states..." << std::endl;
+
+                // Dump all lock states
+                {
+                    std::lock_guard<std::mutex> lock(g_lock_state_mutex);
+                    for (const auto& entry : g_lock_states) {
+                        const LockState& state = entry.second;
+                        state.print(state.locked ? "HELD" : "FREE");
+                    }
+                }
+            }
+        }
+    }
+
+    void unlock() {
+        if (!_locked) return;
+
+        _mutex.unlock();
+        _locked = false;
+
+        // Unregister lock state
+        {
+            std::lock_guard<std::mutex> lock(g_lock_state_mutex);
+            std::string key = _node_id + ":" + _context;
+            g_lock_states.erase(key);
+        }
+
+        std::cout << "[Node " << _node_id << "] LOCK(" << _context
+                  << "): released thread=" << getThreadIdStr() << std::endl;
+    }
+
+    bool owns_lock() const {
+        return _locked;
+    }
+
+private:
+    std::recursive_mutex& _mutex;
+    std::string _node_id;
+    std::string _context;
+    bool _locked;
+};
+
+// Track lock acquisition and release for debugging
+class LockTracker {
+public:
+    LockTracker(const std::string& node_id, std::mutex& mutex)
+        : _node_id(node_id), _mutex(mutex), _locked(false) {}
+
+    void lock(const std::string& context) {
+        _context = context;
+        auto start = std::chrono::steady_clock::now();
+        _mutex.lock();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        _locked = true;
+
+        if (elapsed > 100) {
+            std::cout << "[Node " << _node_id << "] LOCK(" << _context
+                      << "): WARNING - took " << elapsed << "ms"
+                      << " thread=" << getThreadIdStr() << std::endl;
+        }
+    }
+
+    void unlock() {
+        if (_locked) {
+            _mutex.unlock();
+            _locked = false;
+        }
+    }
+
+    ~LockTracker() {
+        if (_locked) {
+            _mutex.unlock();
+        }
+    }
+
+private:
+    std::string _node_id;
+    std::string _context;
+    std::mutex& _mutex;
+    bool _locked;
+};
 
 // Simple FSM implementation for demonstration
 class DemoFSM : public FSM {
@@ -103,9 +296,7 @@ Node::~Node() {
 }
 
 bool Node::start(int port) {
-    std::cout << "[Node " << _server_id << "] start: trying to acquire lock..." << std::endl;
-    std::unique_lock<std::mutex> lock(_mutex);
-    std::cout << "[Node " << _server_id << "] start: lock acquired" << std::endl;
+    DebugLock lock(_mutex, _server_id, "start");
 
     if (_running.load()) {
         std::cout << "[Node " << _server_id << "] start: already running, releasing lock" << std::endl;
@@ -170,6 +361,7 @@ bool Node::start(int port) {
         std::cout << "Node " << _server_id << " started on port " << port
                   << " with LogManager, FSMCaller, ElectionTimer" << std::endl;
 
+        std::cout << "[Node " << _server_id << "] start: returning true, thread=" << getThreadIdStr() << std::endl;
         return true;
 
     } catch (const std::exception& e) {
@@ -194,7 +386,7 @@ void Node::shutdown() {
 
     _running.store(false);
 
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     // Stop all replicators first
     stepDown();
@@ -220,7 +412,7 @@ void Node::shutdown() {
 
 void Node::handlePreVote(const RequestVoteRequest& req,
                           RequestVoteResponse& resp) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     // Pre-vote is a optimization to prevent disrupting the leader
     // Check if we would vote for this candidate
@@ -241,9 +433,8 @@ void Node::handlePreVote(const RequestVoteRequest& req,
 
 void Node::handleRequestVote(const RequestVoteRequest& req,
                              RequestVoteResponse& resp) {
-    std::cout << "[Node " << _server_id << "] handleRequestVote: trying to acquire lock..." << std::endl;
-    std::unique_lock<std::mutex> lock(_mutex);
-    std::cout << "[Node " << _server_id << "] handleRequestVote: lock acquired, state=" << _state
+    DebugLock lock(_mutex, _server_id, "handleRequestVote");
+    std::cout << "[Node " << _server_id << "] handleRequestVote: processing, state=" << _state
               << ", current_term=" << _current_term << std::endl;
 
     resp.granted = false;
@@ -307,7 +498,7 @@ void Node::handleRequestVote(const RequestVoteRequest& req,
 
 void Node::handleAppendEntries(const AppendEntriesRequest& req,
                                AppendEntriesResponse& resp) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     resp.term = _current_term;
     resp.success = false;
@@ -399,7 +590,7 @@ void Node::handleAppendEntries(const AppendEntriesRequest& req,
 
 void Node::handleInstallSnapshot(const InstallSnapshotRequest& req,
                                   InstallSnapshotResponse& resp) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     resp.term = _current_term;
     resp.success = false;
@@ -459,7 +650,7 @@ void Node::handleInstallSnapshot(const InstallSnapshotRequest& req,
 
 void Node::handleTimeoutNow(const TimeoutNowRequest& req,
                              TimeoutNowResponse& resp) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     resp.term = _current_term;
     resp.success = false;
@@ -487,7 +678,7 @@ void Node::handleTimeoutNow(const TimeoutNowRequest& req,
 }
 
 void Node::becomeLeader() {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
     becomeLeaderInternal();
 }
 
@@ -546,7 +737,7 @@ void Node::becomeLeaderInternal() {
 }
 
 void Node::stepDown() {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     // Stop all replicators
     for (auto& replicator : _replicators) {
@@ -573,9 +764,8 @@ void Node::onElectionTimeout() {
 }
 
 void Node::startElection() {
-    std::cout << "[Node " << _server_id << "] startElection: trying to acquire lock..." << std::endl;
-    std::unique_lock<std::mutex> lock(_mutex);
-    std::cout << "[Node " << _server_id << "] startElection: lock acquired, current state=" << _state << std::endl;
+    DebugLock lock(_mutex, _server_id, "startElection");
+    std::cout << "[Node " << _server_id << "] startElection: processing, current state=" << _state << std::endl;
 
     // Only start election if we're follower or candidate
     if (_state == "LEADER") {
@@ -672,7 +862,7 @@ void Node::sendRequestVote() {
 
 void Node::handleVoteResponse(const std::string& peer_id,
                                const RequestVoteResponse& response) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     if (_election_complete.load()) {
         return;  // Election already decided
@@ -734,7 +924,7 @@ int64_t Node::propose(const std::vector<uint8_t>& data) {
     int64_t index;
 
     {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard<std::recursive_mutex> lock(_mutex);
 
         // Only leader can propose
         if (_state != "LEADER") {
@@ -767,7 +957,7 @@ int64_t Node::propose(const std::vector<uint8_t>& data) {
 }
 
 void Node::triggerReplication() {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     if (_state != "LEADER") {
         return;
@@ -782,7 +972,7 @@ void Node::triggerReplication() {
 }
 
 void Node::updateCommitIndex() {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     if (_state != "LEADER") {
         return;
@@ -836,7 +1026,7 @@ void Node::updateCommitIndex() {
 }
 
 bool Node::createSnapshot() {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     if (_commit_index <= 0) {
         std::cerr << "Node " << _server_id
@@ -865,7 +1055,7 @@ int64_t Node::addPeer(const std::string& peer_id) {
     int64_t index;
 
     {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard<std::recursive_mutex> lock(_mutex);
 
         // Only leader can add peers
         if (_state != "LEADER") {
@@ -917,7 +1107,7 @@ int64_t Node::removePeer(const std::string& peer_id) {
     int64_t index;
 
     {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard<std::recursive_mutex> lock(_mutex);
 
         // Only leader can remove peers
         if (_state != "LEADER") {
@@ -975,7 +1165,7 @@ int64_t Node::removePeer(const std::string& peer_id) {
 }
 
 void Node::applyConfiguration(const std::vector<std::string>& new_peers) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     std::cout << "Node " << _server_id << " applying configuration change: "
               << _peers.size() << " -> " << new_peers.size() << " peers" << std::endl;

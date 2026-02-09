@@ -7,6 +7,7 @@
 #include <vector>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 
 #include "braft/v2/node.h"
 
@@ -42,7 +43,9 @@ int main(int argc, char* argv[]) {
 
     // Step 1: Start all nodes
     std::cout << "Step 1: Starting " << num_nodes << " nodes..." << std::endl;
-    for (int i = 0; i < num_nodes; ++i) {
+
+    // DEBUG: Try starting in reverse order to see if issue follows first node
+    for (int i = num_nodes - 1; i >= 0; --i) {
         std::string server_id = peers[i];
         auto node = std::make_shared<Node>(group_id, server_id, peers);
 
@@ -57,13 +60,16 @@ int main(int argc, char* argv[]) {
                   << ") started as " << node->getState() << std::endl;
     }
 
+    // Reverse nodes vector so index 0 is still port 8090 (for leader finding)
+    std::reverse(nodes.begin(), nodes.end());
+
     // Wait for all servers to be fully ready
     std::cout << "\nWaiting for all servers to be ready..." << std::endl;
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     // Step 2: Wait for leader election
     std::cout << "\nStep 2: Waiting for leader election..." << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(3));
+    std::this_thread::sleep_for(std::chrono::seconds(8));  // Increased from 3 to 8 seconds
 
     // Find leader
     Node* leader = nullptr;

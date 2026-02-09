@@ -277,7 +277,10 @@ private:
     std::atomic<bool> _election_complete;  // Election completed flag
 
     // Synchronization
-    mutable std::mutex _mutex;
+    // Use recursive_mutex to handle cases where stepDown() is called
+    // while already holding the mutex (e.g., in handleAppendEntries, handleTimeoutNow, shutdown)
+    using MutexType = std::recursive_mutex;
+    mutable MutexType _mutex;
     std::atomic<bool> _running;
 };
 

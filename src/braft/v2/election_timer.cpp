@@ -67,10 +67,13 @@ void ElectionTimer::start() {
 }
 
 void ElectionTimer::stop() {
+    std::cout << "ElectionTimer::stop() called" << std::endl;
     if (!_running.load()) {
+        std::cout << "ElectionTimer::stop() - not running, returning" << std::endl;
         return;
     }
 
+    std::cout << "ElectionTimer::stop() - stopping timer" << std::endl;
     _running.store(false);
     _stop_requested.store(true);
     _cv.notify_all();
@@ -149,12 +152,18 @@ bool ElectionTimer::sleepUntilTimeout() {
 
     auto last_reset = _last_reset_time.load();
 
+    std::cout << "ElectionTimer: waiting for " << _current_timeout_ms << "ms" << std::endl;
+
     // Wait for timeout or reset
     bool timed_out = _cv.wait_for(lock, std::chrono::milliseconds(_current_timeout_ms),
         [this, last_reset]() {
             return _stop_requested.load() ||
                    _last_reset_time.load() != last_reset;
         });
+
+    std::cout << "ElectionTimer: wait finished, timed_out=" << timed_out
+              << ", _stop_requested=" << _stop_requested.load()
+              << ", _running=" << _running.load() << std::endl;
 
     // If wait returned because of reset, return true to continue loop
     // If wait timed out, trigger election
