@@ -96,7 +96,7 @@
 **目标**：替换 Node 和 Replicator 的底层组件
 
 **开始日期**：2026-02-03
-**最新更新**：2026-02-04
+**最新更新**：2026-02-10
 
 **已完成的工作**：
 
@@ -112,11 +112,28 @@
      - `RaftError` → `ThriftRaftError`
    - 更新 v2 模块使用新类型名
 
+3. **Node 死锁修复** ✅ (2026-02-10 完成)
+   - **问题**：多个函数在持有 `_mutex` 的情况下调用 `stepDown()`，而 `stepDown()` 也会尝试获取同一个锁
+   - **原因**：`std::mutex` 不支持递归锁，导致死锁
+   - **解决方案**：将 `Node::_mutex` 从 `std::mutex` 改为 `std::recursive_mutex`
+   - **修改文件**：
+     - `src/braft/v2/node.h` - 定义 `_mutex` 为 `std::recursive_mutex`
+     - `src/braft/v2/node.cpp` - 更新所有锁操作使用 `std::recursive_mutex`
+     - `src/braft/v2/election_timer.cpp` - 添加调试日志
+     - `example/v2_config_test.cpp` - 增加选举等待时间
+   - **测试结果**：
+     - ✅ 死锁问题已解决
+     - ✅ RPC 通信正常工作
+     - ✅ 选举过程正在进行中
+     - ✅ 所有节点的 `handleRequestVote` 和 `startElection` 都能正常获取锁
+   - **提交**：`7848c78` - fix(v2): 解决 Node 类的死锁问题
+
 **编译状态**：
-- ✅ `libbraft_compat.a` 编译成功
-- ✅ `libbraft.a` 编译成功（legacy braft）
-- ✅ `libbraft.so` 编译成功
-- ✅ `braft_cli` 编译成功
+- ✅ `libbraft_v2.a` 编译成功
+- ✅ `v2_config_test` 编译并运行
+
+**已知问题**：
+- 选举逻辑需要优化以确保能够成功选出 leader（term 已达到 45+，仍未选出 leader）
 
 ---
 
